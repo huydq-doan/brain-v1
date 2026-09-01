@@ -1,7 +1,5 @@
 import { z } from "zod";
 
-const confidenceSchema = z.coerce.number().transform((value) => Math.max(0, Math.min(1, value))).catch(0.6);
-
 export const knowledgeTypeSchema = z.enum([
   "concept",
   "person",
@@ -16,54 +14,50 @@ export const knowledgeTypeSchema = z.enum([
   "other"
 ]);
 
-const tolerantKnowledgeTypeSchema = knowledgeTypeSchema.catch("other");
-
 export const analyzerSchema = z.object({
   candidates: z.array(
     z.object({
       title: z.string().min(1),
-      item_type: tolerantKnowledgeTypeSchema.default("other"),
-      short_summary: z.string().default(""),
-      body: z.string().default(""),
-      confidence: confidenceSchema,
-      supporting_chunk_ids: z.array(z.string()).default([]),
+      item_type: knowledgeTypeSchema,
+      short_summary: z.string().min(1),
+      body: z.string().min(1),
+      confidence: z.number().min(0).max(1),
+      supporting_chunk_ids: z.array(z.string()).min(1),
       entities: z.array(z.string()).default([]),
       dates: z.array(z.string()).default([]),
       relation_hints: z
         .array(
           z.object({
-            target_title: z.string().default(""),
-            relation_type: z
-              .enum([
-                "related_to",
-                "supports",
-                "contradicts",
-                "depends_on",
-                "part_of",
-                "causes",
-                "updates",
-                "example_of"
-              ])
-              .catch("related_to"),
-            explanation: z.string().default(""),
-            confidence: confidenceSchema
+            target_title: z.string(),
+            relation_type: z.enum([
+              "related_to",
+              "supports",
+              "contradicts",
+              "depends_on",
+              "part_of",
+              "causes",
+              "updates",
+              "example_of"
+            ]),
+            explanation: z.string(),
+            confidence: z.number().min(0).max(1)
           })
         )
         .default([])
     })
-  ).default([]),
+  ),
   internal_conflicts: z.array(z.string()).default([])
 });
 
 export const reconcilerSchema = z.object({
-  action: z.enum(["CREATE", "UPDATE", "NO_CHANGE", "CONFLICT"]).catch("CREATE"),
-  target_item_id: z.string().nullable().default(null),
+  action: z.enum(["CREATE", "UPDATE", "NO_CHANGE", "CONFLICT"]),
+  target_item_id: z.string().uuid().nullable(),
   title: z.string().min(1),
-  short_summary: z.string().default(""),
-  body: z.string().default(""),
-  confidence: confidenceSchema,
-  reason: z.string().default(""),
-  relation_type: z.enum(["related_to", "supports", "contradicts", "updates"]).catch("related_to").default("related_to")
+  short_summary: z.string().min(1),
+  body: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1),
+  relation_type: z.enum(["related_to", "supports", "contradicts", "updates"]).default("related_to")
 });
 
 export const answerSchema = z.object({
@@ -71,8 +65,8 @@ export const answerSchema = z.object({
   sections: z
     .array(
       z.object({
-        heading: z.string().default(""),
-        content: z.string().default("")
+        heading: z.string().min(1),
+        content: z.string().min(1)
       })
     )
     .default([]),
@@ -80,25 +74,25 @@ export const answerSchema = z.object({
   citations: z
     .array(
       z.object({
-        claim: z.string().default(""),
-        document_id: z.string().default(""),
-        document_title: z.string().default("Nguồn"),
+        claim: z.string().min(1),
+        document_id: z.string().min(1),
+        document_title: z.string().min(1),
         section: z.string().default(""),
-        chunk_id: z.string().nullable().optional().default(null),
-        excerpt: z.string().default("")
+        chunk_id: z.string().nullable(),
+        excerpt: z.string().min(1)
       })
     )
     .default([]),
-  confidence: confidenceSchema,
-  insufficient_evidence: z.boolean().catch(false).default(false)
+  confidence: z.number().min(0).max(1),
+  insufficient_evidence: z.boolean().default(false)
 });
 
 export type StructuredAnswer = z.infer<typeof answerSchema>;
 
 export const savedKnowledgeSchema = z.object({
   title: z.string().min(1),
-  item_type: tolerantKnowledgeTypeSchema.default("insight"),
-  short_summary: z.string().default(""),
-  body: z.string().default(""),
-  confidence: confidenceSchema
+  item_type: knowledgeTypeSchema.default("insight"),
+  short_summary: z.string().min(1),
+  body: z.string().min(1),
+  confidence: z.number().min(0).max(1)
 });
