@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { StatusPill } from "@/components/status-pill";
 import { createClient } from "@/lib/supabase/server";
+import { SourceActions } from "./source-actions";
 
 type GeneratedKnowledge = {
   knowledge_item_id: string;
@@ -24,12 +25,13 @@ export default async function SourceDetail({ params }: { params: Promise<{ id: s
 
   const chunks = source.document_chunks || [];
   const knowledgeSources = (source.knowledge_sources || []) as GeneratedKnowledge[];
+  const sourceTitle = source.title || source.file_name || source.source_url || "Nguồn chưa đặt tên";
 
   return (
     <section>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="break-words text-2xl font-black text-ink">{source.title || source.file_name || source.source_url}</h1>
+          <h1 className="break-words text-2xl font-black text-ink">{sourceTitle}</h1>
           <p className="mt-1 text-sm text-ink/60">{source.file_name || source.source_url || source.source_type}</p>
         </div>
         <StatusPill status={source.status} />
@@ -40,6 +42,7 @@ export default async function SourceDetail({ params }: { params: Promise<{ id: s
           Đã đọc và lưu nguồn, nhưng AI chưa tạo được tri thức tự động: {source.metadata.analysis_warning}
         </p>
       ) : null}
+      <SourceActions sourceId={source.id} sourceTitle={sourceTitle} />
       <section className="mt-6">
         <h2 className="text-sm font-black uppercase text-ink/60">Tri thức sinh ra</h2>
         <div className="mt-3 space-y-2">
