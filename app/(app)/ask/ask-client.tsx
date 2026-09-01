@@ -31,9 +31,13 @@ type AnswerState = {
 type AnswerMode = "fast" | "standard" | "deep";
 
 function confidenceLabel(value: number) {
-  if (value >= 0.85) return "Căn cứ mạnh";
-  if (value >= 0.65) return "Căn cứ khá";
-  return "Căn cứ hạn chế";
+  if (value >= 0.85) return "Căn cứ tốt";
+  if (value >= 0.65) return "Căn cứ tương đối";
+  return "Cần kiểm tra thêm";
+}
+
+function isMarkdownTable(lines: string[]) {
+  return lines.length >= 2 && lines.every((line) => line.startsWith("|") && line.endsWith("|"));
 }
 
 function renderContent(content: string) {
@@ -41,12 +45,44 @@ function renderContent(content: string) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const bulletLines = lines.filter((line) => /^[-*•]\s+/.test(line));
+
+  if (!lines.length) return null;
+
+  if (isMarkdownTable(lines)) {
+    const rows = lines
+      .filter((line) => !/^\|?\s*:?-+/.test(line.replace(/\|/g, "|")))
+      .map((line) => line.slice(1, -1).split("|").map((cell) => cell.trim()))
+      .filter((row) => !row.every((cell) => /^:?-+:?$/.test(cell)));
+    const [header, ...body] = rows;
+    if (header && body.length) {
+      return (
+        <div className="mt-3 overflow-x-auto rounded-md border border-line">
+          <table className="w-full min-w-[520px] border-collapse text-left text-sm">
+            <thead className="bg-mist text-ink">
+              <tr>{header.map((cell, index) => <th key={index} className="border-b border-line px-3 py-2 font-black">{cell}</th>)}</tr>
+            </thead>
+            <tbody>
+              {body.map((row, rowIndex) => (
+                <tr key={rowIndex} className="border-b border-line last:border-0">
+                  {row.map((cell, cellIndex) => <td key={cellIndex} className="px-3 py-2 align-top leading-6 text-ink/75">{cell}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+  }
+
+  const bulletLines = lines.filter((line) => /^[-*•]\s+|^\d+[.)]\s+/.test(line));
   if (bulletLines.length >= 2 && bulletLines.length === lines.length) {
     return (
-      <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink/75">
+      <ul className="mt-3 space-y-2 text-sm leading-7 text-ink/75">
         {bulletLines.map((line, index) => (
-          <li key={index}>{line.replace(/^[-*•]\s+/, "")}</li>
+          <li key={index} className="flex gap-2">
+            <span className="mt-[1px] font-black text-leaf">•</span>
+            <span>{line.replace(/^[-*•]\s+|^\d+[.)]\s+/, "")}</span>
+          </li>
         ))}
       </ul>
     );
@@ -104,11 +140,7 @@ export function AskClient() {
     <div className="mt-5">
       <form onSubmit={submit}>
         <div className="mb-3 grid grid-cols-3 gap-2 rounded-md bg-white p-1 shadow-soft">
-          {[
-            ["fast", "Nhanh"],
-            ["standard", "Chuẩn"],
-            ["deep", "Chuyên sâu"]
-          ].map(([value, label]) => (
+          {[["fast", "Nhanh"], ["standard", "Chuẩn"], ["deep", "Chuyên sâu"]].map(([value, label]) => (
             <button
               key={value}
               type="button"
@@ -119,6 +151,9 @@ export function AskClient() {
             </button>
           ))}
         </div>
+        <p className="mb-2 text-xs leading-5 text-ink/50">
+          {mode === "fast" ? "Nhanh: câu trả lời ngắn, đúng trọng tâm." : mode === "deep" ? "Chuyên sâu: phân tích nhiều nguồn, rủi ro và căn cứ khi cần." : "Chuẩn: đầy đủ vừa đủ, có căn cứ khi phù hợp."}
+        </p>
         <textarea
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
@@ -128,23 +163,21 @@ export function AskClient() {
           className="w-full resize-none rounded-lg border border-line bg-white p-4 text-lg leading-7 shadow-soft outline-none focus:border-leaf"
         />
         <button disabled={busy} className="mt-3 h-12 w-full rounded-md bg-leaf font-bold text-white disabled:opacity-60">
-          {busy ? "Đang hỏi" : "Hỏi BRAIN"}
+          {busy ? "Đang xử lý..." : "Hỏi BRAIN"}
         </button>
       </form>
       {error ? <p className="mt-4 rounded-md bg-clay/10 p-3 text-sm text-clay">{error}</p> : null}
       {answer ? (
-        <article className="mt-6 rounded-lg border border-line bg-white shadow-soft">
-          <div className="flex items-center justify-between gap-3">
-            <p className="px-4 pt-4 text-xs font-bold uppercase text-ink/45">{confidenceLabel(answer.confidence)}</p>
-            <button onClick={saveAnswer} className="h-9 rounded-md bg-ink px-3 text-xs font-bold text-white">
-              Lưu thành tri thức
-            </button>
+        <article className="mt-6 overflow-hidden rounded-lg border border-line bg-white shadow-soft">
+          <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+            <p className="text-xs font-bold uppercase text-ink/45">{confidenceLabel(answer.confidence)}</p>
+            <button onClick={saveAnswer} className="h-9 rounded-md bg-ink px-3 text-xs font-bold text-white">Lưu thành tri thức</button>
           </div>
           {answer.insufficient_evidence ? (
-            <p className="mx-4 mt-4 rounded-md bg-clay/10 p-3 text-sm leading-6 text-clay">{answer.direct_answer}</p>
+            <p className="m-4 rounded-md bg-clay/10 p-3 text-sm leading-6 text-clay">{answer.direct_answer}</p>
           ) : (
-            <section className="px-4 pb-2 pt-4">
-              <h2 className="text-sm font-black uppercase text-ink/50">Trả lời ngắn</h2>
+            <section className="px-4 py-4">
+              <h2 className="text-xs font-black uppercase tracking-wide text-ink/45">Trả lời</h2>
               <p className="mt-2 text-lg font-bold leading-8 text-ink">{answer.direct_answer}</p>
             </section>
           )}
@@ -156,27 +189,23 @@ export function AskClient() {
           ))}
           {answer.practical_conclusion ? (
             <section className="border-t border-line bg-mist px-4 py-4">
-              <h2 className="text-base font-black text-ink">Kết luận thực hành</h2>
-              <p className="mt-3 text-sm font-semibold leading-7 text-ink/75">{answer.practical_conclusion}</p>
+              <h2 className="text-sm font-black text-ink">Kết luận áp dụng</h2>
+              <p className="mt-2 text-sm font-semibold leading-7 text-ink/75">{answer.practical_conclusion}</p>
             </section>
           ) : null}
           {answer.citations.length ? (
-            <div className="border-t border-line px-4 py-4">
-              <h2 className="text-sm font-black uppercase text-ink/60">Căn cứ</h2>
+            <details className="border-t border-line px-4 py-4">
+              <summary className="cursor-pointer text-sm font-black text-ink/70">Xem căn cứ ({answer.citations.length})</summary>
               <div className="mt-3 flex flex-col gap-2">
                 {answer.citations.map((citation, index) => (
-                  <Link
-                    key={`${citation.document_id}-${citation.chunk_id}-${index}`}
-                    href={`/sources/${citation.document_id}`}
-                    className="rounded-md border border-line bg-mist p-3"
-                  >
+                  <Link key={`${citation.document_id}-${citation.chunk_id}-${index}`} href={`/sources/${citation.document_id}`} className="rounded-md border border-line bg-mist p-3">
                     <p className="text-sm font-bold text-ink">{citation.document_title}</p>
-                    {citation.claim ? <p className="mt-1 text-xs font-bold uppercase text-leaf">{citation.claim}</p> : null}
+                    {citation.claim ? <p className="mt-1 text-xs font-bold text-leaf">{citation.claim}</p> : null}
                     <p className="mt-1 text-sm leading-6 text-ink/65">{citation.excerpt}</p>
                   </Link>
                 ))}
               </div>
-            </div>
+            </details>
           ) : null}
           {saved ? <p className="px-4 pb-4 text-sm font-bold text-leaf">{saved}</p> : null}
         </article>
