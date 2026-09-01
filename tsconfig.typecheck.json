@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "next-env.d.ts",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "components/**/*.ts",
+    "components/**/*.tsx",
+    "lib/**/*.ts",
+    "middleware.ts",
+    "next.config.ts",
+    "tailwind.config.ts",
+    "tests/**/*.ts"
+  ],
+  "exclude": ["node_modules", ".next"]
+}
