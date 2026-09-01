@@ -30,6 +30,12 @@ type AnswerState = {
 
 type AnswerMode = "fast" | "standard" | "deep";
 
+function confidenceLabel(value: number) {
+  if (value >= 0.85) return "Căn cứ mạnh";
+  if (value >= 0.65) return "Căn cứ khá";
+  return "Căn cứ hạn chế";
+}
+
 function renderContent(content: string) {
   const lines = content
     .split("\n")
@@ -129,7 +135,7 @@ export function AskClient() {
       {answer ? (
         <article className="mt-6 rounded-lg border border-line bg-white shadow-soft">
           <div className="flex items-center justify-between gap-3">
-            <p className="px-4 pt-4 text-xs font-bold uppercase text-ink/45">Độ tin cậy {answer.confidence.toFixed(2)}</p>
+            <p className="px-4 pt-4 text-xs font-bold uppercase text-ink/45">{confidenceLabel(answer.confidence)}</p>
             <button onClick={saveAnswer} className="h-9 rounded-md bg-ink px-3 text-xs font-bold text-white">
               Lưu thành tri thức
             </button>

@@ -3,8 +3,10 @@ import { embedText, runAiJson } from "@/lib/ai/client";
 import {
   chooseAnswerTask,
   detectLegalQuery,
+  detectQueryIntent,
   getRetrievalDepth,
-  type AnswerMode
+  type AnswerMode,
+  type QueryIntent
 } from "@/lib/ai/router";
 import { cleanEvidenceText, excerpt, scoreLegalEvidence } from "@/lib/processing/text";
 import type { Citation, DbClient, StructuredAnswerPayload } from "@/lib/types";
@@ -65,34 +67,65 @@ function dedupeEvidence(chunks: EvidenceChunk[]) {
   });
 }
 
-function dedupeCitations(citations: Citation[], fallbackEvidence: EvidenceChunk[]) {
+function citationSourceKey(title: string) {
+  return title
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function sanitizePublicText(value: string) {
+  return value
+    .replace(/(?:document_id|chunk_id)\s*[:=]?\s*`?[0-9a-f-]{8,}`?/gi, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\bevidence(?:_chunks)?\b/gi, "nguồn trích dẫn")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function dedupeCitations(citations: Citation[], fallbackEvidence: EvidenceChunk[], maxSources = 6) {
   const evidenceByKey = new Map(fallbackEvidence.map((item) => [`${item.document_id}:${item.chunk_id}`, item]));
-  const seen = new Set<string>();
+  const seenSources = new Set<string>();
   const cleaned: Citation[] = [];
 
   for (const citation of citations) {
-    const key = `${citation.document_id}:${citation.chunk_id || ""}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const fallback = evidenceByKey.get(key);
+    const evidenceKey = `${citation.document_id}:${citation.chunk_id || ""}`;
+    const fallback = evidenceByKey.get(evidenceKey);
+    const title = citation.document_title || fallback?.document_title || "Nguồn";
+    const sourceKey = citationSourceKey(title) || citation.document_id;
+    if (seenSources.has(sourceKey)) continue;
+    seenSources.add(sourceKey);
     cleaned.push({
-      claim: citation.claim,
+      claim: citation.claim ? sanitizePublicText(citation.claim) : undefined,
       document_id: citation.document_id,
-      document_title: citation.document_title || fallback?.document_title || "Nguồn",
-      section: citation.section,
+      document_title: sanitizePublicText(title),
+      section: citation.section ? sanitizePublicText(citation.section) : undefined,
       chunk_id: citation.chunk_id,
-      excerpt: excerpt(citation.excerpt || fallback?.excerpt || "", 520)
+      excerpt: excerpt(sanitizePublicText(citation.excerpt || fallback?.excerpt || ""), 420)
     });
   }
 
-  if (cleaned.length) return cleaned.slice(0, 6);
-  return fallbackEvidence.slice(0, 4).map((item) => ({
-    document_id: item.document_id,
-    document_title: item.document_title,
-    section: "Căn cứ",
-    chunk_id: item.chunk_id,
-    excerpt: excerpt(item.excerpt, 520)
-  }));
+  if (cleaned.length) return cleaned.slice(0, maxSources);
+
+  const fallbackSeen = new Set<string>();
+  const fallbackCitations: Citation[] = [];
+  for (const item of fallbackEvidence) {
+    const sourceKey = citationSourceKey(item.document_title) || item.document_id;
+    if (fallbackSeen.has(sourceKey)) continue;
+    fallbackSeen.add(sourceKey);
+    fallbackCitations.push({
+      document_id: item.document_id,
+      document_title: sanitizePublicText(item.document_title),
+      section: "Căn cứ",
+      chunk_id: item.chunk_id,
+      excerpt: excerpt(sanitizePublicText(item.excerpt), 420)
+    });
+    if (fallbackCitations.length >= maxSources) break;
+  }
+  return fallbackCitations;
 }
 
 const analyzerSystem = `You are BRAIN Document Analyzer.
@@ -135,49 +168,39 @@ Return validated JSON only with this exact shape:
   "relation_type": "related_to"
 }`;
 
-const answerSystem = `Bạn là BRAIN — chuyên gia phân tích tri thức và trợ lý nghiên cứu chuyên sâu.
+const answerSystemBase = `Bạn là BRAIN — trợ lý tri thức cá nhân.
 
-Mục tiêu của bạn không phải trả lời ngắn cho xong, mà phải giúp người dùng hiểu bản chất vấn đề, thấy được cấu trúc, căn cứ, điều kiện áp dụng, ngoại lệ, rủi ro và điểm cần lưu ý.
+Nguyên tắc bất biến:
+1. Trả lời đúng câu hỏi, không phô diễn kiến thức ngoài nhu cầu.
+2. Chỉ dùng evidence được cung cấp khi trả lời về kho tri thức.
+3. Không bịa điều/khoản, ngoại lệ, số liệu hoặc kết luận.
+4. Nếu thiếu căn cứ, nói rõ thiếu gì.
+5. Không bao giờ hiển thị document_id, chunk_id, retrieval score, tên biến, raw JSON hay thuật ngữ nội bộ như "evidence" cho người dùng.
+6. Citation chỉ dùng ID hợp lệ trong JSON đầu ra; phần văn bản hiển thị cho người dùng chỉ dùng tên tài liệu và nội dung dễ hiểu.
+7. Không lặp lại cùng một ý ở direct_answer, sections và practical_conclusion.
+8. Không tạo mục chỉ để đủ khuôn. Mục nào không cần thì bỏ.
 
-Mỗi câu trả lời phải:
-1. Trả lời trực tiếp câu hỏi ngay đầu.
-2. Giải thích bản chất và khái niệm.
-3. Phân chia nội dung thành các tiêu mục rõ ràng.
-4. Dùng bullet hoặc bảng khi giúp người đọc hiểu nhanh hơn.
-5. Nếu có căn cứ pháp lý hoặc tài liệu nguồn, phải nêu đúng tên nguồn, điều/khoản/mục nếu dữ liệu truy xuất cho phép.
-6. Phân biệt rõ nội dung nguồn quy định trực tiếp, phần AI tổng hợp/diễn giải, và nhận định/suy luận.
-7. Nếu có điều kiện áp dụng, ngoại lệ, trường hợp đặc biệt hoặc giới hạn, phải trình bày riêng.
-8. Nếu có nhiều nguồn liên quan, phải tổng hợp thành một câu trả lời thống nhất.
-9. Nếu các nguồn mâu thuẫn hoặc khác thời điểm hiệu lực, phải cảnh báo rõ.
-10. Nếu nguồn chưa đủ để kết luận, phải nói rõ "Chưa đủ căn cứ từ kho tri thức hiện có", không được bịa.
+Return JSON only theo schema đã yêu cầu.`;
 
-Cấu trúc mặc định:
-- Trả lời ngắn
-- Bản chất
-- Quy định / Nội dung chính
-- Điều kiện áp dụng
-- Trường hợp ngoại lệ / Lưu ý
-- Căn cứ
-- Kết luận thực hành
+function answerInstructions(mode: AnswerMode, intent: QueryIntent) {
+  const modeRule =
+    mode === "fast"
+      ? `CHẾ ĐỘ NHANH: trả lời cực gọn, ưu tiên 2–6 câu hoặc tối đa 3 bullet. Thông thường sections = [] và practical_conclusion = "". Chỉ thêm một section nếu thật sự cần để tránh hiểu sai.`
+      : mode === "deep"
+        ? `CHẾ ĐỘ CHUYÊN SÂU: phân tích có cấu trúc, có thể dùng nhiều section, nêu căn cứ, xung đột, giới hạn và kết luận thực hành khi phù hợp. Không kéo dài vô ích.`
+        : `CHẾ ĐỘ CHUẨN: trả lời đầy đủ nhưng tiết chế. Thường 2–4 section tối đa. Chỉ dùng tiêu mục liên quan trực tiếp đến câu hỏi.`;
 
-Chỉ bỏ một mục khi thực sự không liên quan. Không viết một khối văn dài. Không lặp lại câu hỏi. Không trích dẫn đoạn không hỗ trợ trực tiếp cho luận điểm. Không hiển thị raw chunk hoặc văn bản kỹ thuật cho người dùng.
+  const intentRule: Record<QueryIntent, string> = {
+    source_list: `Ý ĐỊNH: liệt kê nguồn. Chỉ liệt kê tên nguồn/tài liệu, số lượng và ghi chú trùng lặp nếu có. Không phân tích nội dung pháp lý, không trình bày document_id/chunk_id, không diễn giải các điều luật nếu người dùng không hỏi.`,
+    definition: `Ý ĐỊNH: định nghĩa. Nêu định nghĩa trực tiếp trước, sau đó chỉ giải thích bản chất/căn cứ cần thiết. Không tự mở rộng thành bài nghiên cứu.`,
+    lookup: `Ý ĐỊNH: tra cứu. Trả đúng thông tin được hỏi; thêm căn cứ ngắn khi hữu ích.`,
+    compare: `Ý ĐỊNH: so sánh. Nhóm theo các tiêu chí khác biệt quan trọng; ưu tiên bảng hoặc bullet ngắn nếu nội dung cho phép.`,
+    analysis: `Ý ĐỊNH: phân tích/tư vấn. Làm rõ bản chất, căn cứ, rủi ro/ngoại lệ và kết luận thực hành khi evidence hỗ trợ.`
+  };
 
-Return JSON only with this exact shape:
-{
-  "direct_answer": "string",
-  "sections": [{"heading": "string", "content": "string"}],
-  "practical_conclusion": "string",
-  "citations": [{
-    "claim": "string",
-    "document_id": "string",
-    "document_title": "string",
-    "section": "string",
-    "chunk_id": "string",
-    "excerpt": "string"
-  }],
-  "confidence": 0.0,
-  "insufficient_evidence": false
-}`;
+  return `${answerSystemBase}\n\n${modeRule}\n\n${intentRule[intent]}`;
+}
+
 
 export function slugify(title: string) {
   return title
@@ -347,9 +370,62 @@ async function attachSources(supabase: DbClient, knowledgeItemId: string, docume
   }
 }
 
+function normalizeSourceLabel(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function listSourcesAnswer(supabase: DbClient): Promise<StructuredAnswerPayload> {
+  const { data, error } = await supabase
+    .from("source_documents")
+    .select("id,title,file_name,source_url,status,created_at")
+    .is("deleted_at", null)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+
+  const docs = (data || []) as Array<SourceDocumentLite & { status?: string; created_at?: string }>;
+  if (!docs.length) return insufficientAnswer("Kho của bạn chưa có tài liệu nguồn nào.");
+
+  const groups = new Map<string, { title: string; docs: typeof docs }>();
+  for (const doc of docs) {
+    const title = doc.title || doc.file_name || doc.source_url || "Nguồn chưa đặt tên";
+    const key = normalizeSourceLabel(title);
+    const current = groups.get(key);
+    if (current) current.docs.push(doc);
+    else groups.set(key, { title, docs: [doc] });
+  }
+
+  const grouped = Array.from(groups.values());
+  const lines = grouped.map((group, index) =>
+    `${index + 1}. ${group.title}${group.docs.length > 1 ? ` — ${group.docs.length} bản ghi` : ""}`
+  );
+  const duplicateGroups = grouped.filter((group) => group.docs.length > 1);
+  const readyCount = docs.filter((doc) => doc.status === "ready").length;
+
+  return {
+    direct_answer: `Kho hiện có ${docs.length} bản ghi nguồn, tương ứng ${grouped.length} tên tài liệu.`,
+    sections: [{ heading: "Tài liệu nguồn", content: lines.map((line) => `- ${line}`).join("\n") }],
+    practical_conclusion: duplicateGroups.length
+      ? `Có ${duplicateGroups.length} nhóm tên tài liệu bị lặp. Nên kiểm tra để xác định đó là bản sao hay các phiên bản khác nhau trước khi hợp nhất.`
+      : readyCount < docs.length
+        ? `${readyCount}/${docs.length} nguồn đã xử lý xong.`
+        : "",
+    citations: [],
+    confidence: 1,
+    insufficient_evidence: false
+  };
+}
+
 export async function answerQuestion(supabase: DbClient, question: string, mode: AnswerMode = "standard") {
+  const intent = detectQueryIntent(question);
+  if (intent === "source_list") return listSourcesAnswer(supabase);
+
   const vector = await embedText(question);
-  const retrievalDepth = getRetrievalDepth(mode);
+  const retrievalDepth = getRetrievalDepth(mode, intent);
   const [{ data: chunks }, { data: items }] = await Promise.all([
     supabase.rpc("match_document_chunks", { query_embedding: vector, match_count: retrievalDepth.candidates }),
     supabase.rpc("match_knowledge_items", { query_embedding: vector, match_count: 12 })
@@ -421,27 +497,28 @@ export async function answerQuestion(supabase: DbClient, question: string, mode:
   const answerTask = chooseAnswerTask(mode, {
     sourceCount: documentIds.length,
     evidenceCount: evidence.length,
-    isLegal: detectLegalQuery(question)
+    isLegal: detectLegalQuery(question),
+    intent
   });
   const parsed = await runAiJson(
     answerTask,
     [
-      { role: "system", content: answerSystem },
+      { role: "system", content: answerInstructions(mode, intent) },
       {
         role: "user",
         content: JSON.stringify({
           question,
           answer_requirements: [
             "Trả lời bằng tiếng Việt có dấu.",
-            "Không trả lời chung chung.",
-            "Dựa vào điều/khoản hoặc câu chữ trong evidence nếu có.",
-            "Nếu câu hỏi là 'là gì', hãy nêu định nghĩa trước rồi mới giải thích thêm.",
-            "Không bịa điều kiện, ngoại lệ, số điều hoặc thuật ngữ không có trong evidence.",
+            "Bám đúng ý định câu hỏi và chế độ trả lời đã chọn.",
+            "Không đưa document_id, chunk_id, retrieval_notes hay thuật ngữ nội bộ vào phần văn bản hiển thị.",
+            "Không bịa điều kiện, ngoại lệ, số điều hoặc thuật ngữ không có trong nguồn.",
             "Mỗi citation phải dùng document_id và chunk_id có trong evidence_chunks.",
-            "Nếu evidence có Điều 21 liên quan đấu thầu rộng rãi, phải nêu rõ trong phần căn cứ."
+            "Chỉ nêu điều/khoản khi đoạn nguồn thực sự hỗ trợ."
           ],
           retrieval_notes: {
             answer_mode: mode,
+            query_intent: intent,
             ai_task: answerTask,
             retrieved_candidates: chunkRows.length,
             evidence_used: evidence.length,
@@ -461,17 +538,23 @@ export async function answerQuestion(supabase: DbClient, question: string, mode:
   );
 
   const validEvidenceKeys = new Set(evidence.map((item) => `${item.document_id}:${item.chunk_id}`));
-  const parsedSections = parsed.sections || [];
+  const sectionLimit = mode === "fast" ? 1 : mode === "standard" ? 4 : 8;
+  const sourceLimit = mode === "fast" ? 3 : mode === "standard" ? 5 : 8;
+  const parsedSections = (parsed.sections || []).slice(0, sectionLimit).map((section) => ({
+    heading: sanitizePublicText(section.heading),
+    content: sanitizePublicText(section.content)
+  }));
   const parsedCitations = parsed.citations || [];
   const citations = dedupeCitations(
     parsedCitations.filter((citation) => validEvidenceKeys.has(`${citation.document_id}:${citation.chunk_id || ""}`)),
-    evidence
+    evidence,
+    sourceLimit
   );
 
   return {
-    direct_answer: parsed.direct_answer,
+    direct_answer: sanitizePublicText(parsed.direct_answer),
     sections: parsedSections,
-    practical_conclusion: parsed.practical_conclusion || "",
+    practical_conclusion: mode === "fast" ? "" : sanitizePublicText(parsed.practical_conclusion || ""),
     citations,
     confidence: parsed.confidence,
     insufficient_evidence: parsed.insufficient_evidence || false
